@@ -6,12 +6,12 @@ from pydantic import BaseModel, Field
 
 
 class IngestChunk(BaseModel):
-    path: str
-    type: str
+    node_path: str
+    node_type: str
     comment: str = ""
-    wrangle_code: str = ""
+    vex_snippet: str = ""
+    non_default_parms: dict[str, Any] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
-    non_default_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreativeIngestRequest(BaseModel):
@@ -36,9 +36,14 @@ class CreativeCrossQueryRequest(BaseModel):
     exclude_hip: Optional[str] = None
 
 
+class CreativeListProvidersRequest(BaseModel):
+    action: str = "creative_list_providers"
+
+
 class CreativeResponse(BaseModel):
     status: str = "success"
     action: str
     answer: str = ""
     chunks_retrieved: int = 0
     message: Optional[str] = None
+

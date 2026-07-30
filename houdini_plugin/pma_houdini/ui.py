@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import html
 import logging
+import os
+import re
 import sys
 from typing import Any
 
@@ -94,23 +96,76 @@ QHeaderView::section {
 """
 
 
+def _format_markdown_to_html(text: str) -> str:
+    """Format markdown text into HTML with formatted pre/code VEX blocks."""
+    # First extract code blocks
+    code_blocks = []
+
+    def save_block(match):
+        code_content = match.group(1)
+        code_blocks.append(code_content)
+        return f"___CODE_BLOCK_{len(code_blocks)-1}___"
+
+    pattern = r"```(?:c|vex|python)?\s*([\s\S]*?)\s*```"
+    text_without_code = re.sub(pattern, save_block, text)
+
+    escaped = html.escape(text_without_code).replace("\n", "<br/>")
+
+    for idx, code in enumerate(code_blocks):
+        code_escaped = html.escape(code)
+        block_html = f"<pre style='background-color: #111; color: #00ffcc; padding: 8px; border-radius: 4px; font-family: Consolas, monospace;'><code>{code_escaped}</code></pre>"
+        escaped = escaped.replace(f"___CODE_BLOCK_{idx}___", block_html)
+
+    return escaped
+
+
+class WorkerThread(QtCore.QThread):
+    """Background worker thread to keep Qt main UI loop unblocked during network calls."""
+    finished_signal = QtCore.Signal(dict)
+    error_signal = QtCore.Signal(str)
+
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            res = self.func(*self.args, **self.kwargs)
+            if isinstance(res, dict):
+                self.finished_signal.emit(res)
+            else:
+                self.finished_signal.emit({"result": res})
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+
 class PMAPanel(QtWidgets.QDialog):
     """Floating non-blocking PySide Qt Panel for PMA Creative Assistant."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("PMA Creative Assistant — Houdini")
-        self.resize(600, 520)
-        self.setMinimumSize(450, 400)
+        self.resize(650, 550)
+        self.setMinimumSize(480, 420)
         self.setStyleSheet(DARK_STYLESHEET)
 
-        # Non-blocking dialog behavior
-        self.setWindowFlags(
-            QtCore.Qt.WindowType.Window
-            | QtCore.Qt.WindowType.WindowMinMaxButtonsHint
-            | QtCore.Qt.WindowType.WindowCloseButtonHint
-        )
+        # PySide2 vs PySide6 safe window flags
+        window_flag = getattr(QtCore.Qt, "Window", getattr(getattr(QtCore.Qt, "WindowType", None), "Window", None))
+        min_max_flag = getattr(QtCore.Qt, "WindowMinMaxButtonsHint", getattr(getattr(QtCore.Qt, "WindowType", None), "WindowMinMaxButtonsHint", None))
+        close_flag = getattr(QtCore.Qt, "WindowCloseButtonHint", getattr(getattr(QtCore.Qt, "WindowType", None), "WindowCloseButtonHint", None))
 
+        flags = window_flag
+        if min_max_flag:
+            flags |= min_max_flag
+        if close_flag:
+            flags |= close_flag
+
+        if flags:
+            self.setWindowFlags(flags)
+
+        self.workers = []
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -131,8 +186,13 @@ class PMAPanel(QtWidgets.QDialog):
         self._init_projects_tab()
         self.tabs.addTab(self.projects_tab, "Project Registry")
 
+        # Tab 3: Settings (Provider / Model Selection)
+        self.settings_tab = QtWidgets.QWidget()
+        self._init_settings_tab()
+        self.tabs.addTab(self.settings_tab, "Settings")
+
         # Status Bar
-        self.status_label = QtWidgets.QLabel("PMA Connected over WebSocket")
+        self.status_label = QtWidgets.QLabel("Zeni Standalone Connected over WebSocket")
         self.status_label.setStyleSheet("color: #888888; font-size: 11px;")
         main_layout.addWidget(self.status_label)
 
@@ -194,63 +254,100 @@ class PMAPanel(QtWidgets.QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
+    def _init_settings_tab(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self.settings_tab)
+        form_layout = QtWidgets.QFormLayout()
+
+        self.input_core_url = QtWidgets.QLineEdit("http://localhost:8000")
+        form_layout.addRow("PMA Core URL:", self.input_core_url)
+
+        self.input_token = QtWidgets.QLineEdit()
+        self.input_token.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.input_token.setPlaceholderText("Optional access token")
+        form_layout.addRow("Access Token:", self.input_token)
+
+        self.combo_provider = QtWidgets.QComboBox()
+        self.combo_provider.addItems(["ollama", "lm_studio", "openai", "anthropic", "gemini"])
+        form_layout.addRow("LLM Provider:", self.combo_provider)
+
+        self.input_model = QtWidgets.QLineEdit("llama3")
+        self.input_model.setPlaceholderText("e.g. llama3, gpt-4o, claude-3-5-sonnet")
+        form_layout.addRow("Model Name:", self.input_model)
+
+        layout.addLayout(form_layout)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_load_providers = QtWidgets.QPushButton("Refresh Providers from Core")
+        self.btn_load_providers.setObjectName("secondaryBtn")
+        self.btn_load_providers.clicked.connect(self._on_load_providers)
+        btn_row.addWidget(self.btn_load_providers)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
     def _on_send_question(self) -> None:
         question = self.input_field.text().strip()
         if not question:
             return
 
         self.input_field.clear()
-        self.status_label.setText("Querying PMA Core...")
+        self.status_label.setText("Querying Zeni Assistant...")
         scope = self.scope_combo.currentText()
+        provider = self.combo_provider.currentText().strip()
+        model = self.input_model.text().strip()
 
         # Render Question in Chat Log
         q_html = f"<div style='margin-bottom: 8px;'><b>You:</b> {html.escape(question)}</div>"
         self.chat_display.append(q_html)
 
+        from pma_houdini import client
+
+        hip_file = ""
         try:
-            from pma_houdini import client
+            import hou
+            hip_file = hou.hipFile.path()
+        except Exception:
+            pass
 
-            hip_file = ""
-            try:
-                import hou
-                hip_file = hou.hipFile.path()
-            except Exception:
-                pass
-
+        def run_query():
             if scope == "Current Scene":
-                resp = client.ask(question, hip_file=hip_file)
+                return client.ask(question, hip_file=hip_file, provider=provider, model=model)
             else:
-                resp = client.cross_search(question)
+                return client.cross_search(question, provider=provider, model=model)
 
+        worker = WorkerThread(run_query)
+
+        def on_success(resp):
             answer = resp.get("answer", "No answer returned.")
-            sources = resp.get("sources", [])
+            used_prov = resp.get("provider") or provider
+            used_model = resp.get("model") or model
 
-            # Format Answer HTML
             ans_html = (
                 f"<div style='background-color: #1e2638; border-left: 3px solid #007acc; "
                 f"padding: 8px; border-radius: 4px; margin-bottom: 12px;'>"
-                f"<b>PMA Assistant:</b><br/>{html.escape(answer).replace('\n', '<br/>')}"
+                f"<b>Zeni Assistant</b> <small style='color: #888888;'>({used_prov} / {used_model})</small>:<br/>"
+                f"{_format_markdown_to_html(answer)}</div>"
             )
-            if sources:
-                src_str = ", ".join(str(s) for s in sources)
-                ans_html += f"<br/><br/><small style='color: #88bbff;'>Sources: {html.escape(src_str)}</small>"
-            ans_html += "</div>"
-
             self.chat_display.append(ans_html)
             self.status_label.setText("Done.")
-        except Exception as e:
-            err_html = f"<div style='color: #ff6b6b;'><b>Error:</b> {html.escape(str(e))}</div>"
+
+        def on_error(err_msg):
+            err_html = f"<div style='color: #ff6b6b;'><b>Error:</b> {html.escape(err_msg)}</div>"
             self.chat_display.append(err_html)
             self.status_label.setText("Query Error")
 
+        worker.finished_signal.connect(on_success)
+        worker.error_signal.connect(on_error)
+        self.workers.append(worker)
+        worker.start()
+
     def _on_index_scene(self) -> None:
         self.status_label.setText("Extracting scene nodes...")
-        QtWidgets.QApplication.processEvents()
+
+        from pma_houdini import client, extractor, version_detect
+        import hou
 
         try:
-            from pma_houdini import client, extractor, version_detect
-            import hou
-
             hip_file = hou.hipFile.path()
             v_info = version_detect.detect_houdini_version()
             chunks = extractor.extract_scene("/obj", max_nodes=10000)
@@ -259,25 +356,40 @@ class PMAPanel(QtWidgets.QDialog):
                 self.status_label.setText("No nodes worth indexing found under /obj.")
                 return
 
-            resp = client.ingest_scene(
-                hip_file=hip_file,
-                chunks=chunks,
-                houdini_version=v_info.get("full_version", ""),
-                platform=v_info.get("platform", ""),
-            )
-            indexed_count = resp.get("indexed", len(chunks))
-            self.status_label.setText(f"Successfully indexed {indexed_count} nodes.")
-            self._on_refresh_projects()
+            def run_ingest():
+                return client.ingest_scene(
+                    hip_file=hip_file,
+                    chunks=chunks,
+                    houdini_version=v_info.get("full_version", ""),
+                    platform=v_info.get("platform", ""),
+                )
+
+            worker = WorkerThread(run_ingest)
+
+            def on_success(resp):
+                count = resp.get("chunks_ingested", len(chunks))
+                self.status_label.setText(f"Successfully indexed {count} nodes.")
+                self._on_refresh_projects()
+
+            def on_error(err):
+                self.status_label.setText(f"Indexing Error: {err}")
+
+            worker.finished_signal.connect(on_success)
+            worker.error_signal.connect(on_error)
+            self.workers.append(worker)
+            worker.start()
+
         except Exception as e:
-            self.status_label.setText(f"Indexing Error: {e}")
+            self.status_label.setText(f"Extraction Error: {e}")
 
     def _on_refresh_projects(self) -> None:
-        try:
-            from pma_houdini import client
+        from pma_houdini import client
 
-            projects = client.list_projects()
+        worker = WorkerThread(client.list_projects)
+
+        def on_success(res):
+            projects = res.get("result", [])
             self.table.setRowCount(0)
-
             for p in projects:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
@@ -287,8 +399,40 @@ class PMAPanel(QtWidgets.QDialog):
                 self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(p.get("last_indexed"))))
 
             self.status_label.setText(f"Loaded {len(projects)} projects.")
-        except Exception as e:
-            self.status_label.setText(f"Refresh Error: {e}")
+
+        def on_error(err):
+            self.status_label.setText(f"Refresh Error: {err}")
+
+        worker.finished_signal.connect(on_success)
+        worker.error_signal.connect(on_error)
+        self.workers.append(worker)
+        worker.start()
+
+    def _on_load_providers(self) -> None:
+        from pma_houdini import client
+
+        self.status_label.setText("Fetching providers from PMA Core...")
+        worker = WorkerThread(client.list_providers)
+
+        def on_success(res):
+            providers = res.get("result", [])
+            if providers:
+                self.combo_provider.clear()
+                for p in providers:
+                    p_name = p.get("id") or p.get("name")
+                    if p_name:
+                        self.combo_provider.addItem(p_name)
+                self.status_label.setText(f"Loaded {len(providers)} providers from Core.")
+            else:
+                self.status_label.setText("No custom providers returned from Core.")
+
+        def on_error(err):
+            self.status_label.setText(f"Could not load providers: {err}")
+
+        worker.finished_signal.connect(on_success)
+        worker.error_signal.connect(on_error)
+        self.workers.append(worker)
+        worker.start()
 
 
 def show_pma_panel() -> PMAPanel:

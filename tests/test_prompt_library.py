@@ -1,4 +1,4 @@
-"""Unit tests for prompt_library and specialized Houdini pain-point prompts."""
+"""Unit tests for prompt_library and active Houdini prompts."""
 from __future__ import annotations
 
 from src.core.prompt_library import (
@@ -13,9 +13,6 @@ def test_prompt_library_all_prompts():
         "copilot_td",
         "vex_expert",
         "sim_debugger",
-        "usd_solaris",
-        "kinefx_rigging",
-        "tops_pdg",
         "cross_search",
         "trial_triage",
     ]
@@ -26,9 +23,7 @@ def test_prompt_library_all_prompts():
 
     assert "VEX Language & Mathematics Specialist" in PromptLibrary.get_prompt("vex_expert")
     assert "DOPs & Dynamics Simulation Specialist" in PromptLibrary.get_prompt("sim_debugger")
-    assert "Solaris (LOPs) & OpenUSD Pipeline Specialist" in PromptLibrary.get_prompt("usd_solaris")
-    assert "KineFX Rigging & Motion Specialist" in PromptLibrary.get_prompt("kinefx_rigging")
-    assert "TOPs (Procedural Dependency Graph)" in PromptLibrary.get_prompt("tops_pdg")
+    assert "Lead VFX Pipeline Architect" in PromptLibrary.get_prompt("cross_search")
 
 
 def test_format_cacheable_prompt_with_specialized_prompt():

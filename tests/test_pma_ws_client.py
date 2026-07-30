@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 import pytest
+import os
 
 from houdini_plugin.pma_houdini import client
 
@@ -11,9 +12,11 @@ def mock_keyring():
         yield mock
 
 
-def test_client_no_token():
-    with patch("keyring.get_password", return_value=None):
-        with pytest.raises(RuntimeError, match="X_LOCAL_ACCESS_TOKEN not found"):
+def test_client_no_token(monkeypatch):
+    monkeypatch.delenv("ZENI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("X_LOCAL_ACCESS_TOKEN", raising=False)
+    with patch("keyring.get_password", side_effect=Exception("No keyring")):
+        with pytest.raises(RuntimeError, match="Access token not found"):
             client.ask("test query")
 
 
@@ -37,14 +40,14 @@ def test_client_ingest_scene_success(mock_keyring):
     with patch("websockets.connect") as mock_connect:
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = (
-            '{"status": "success", "action": "creative_ingest", "indexed": 5}'
+            '{"status": "success", "action": "creative_ingest", "chunks_ingested": 5}'
         )
         mock_connect.return_value.__aenter__.return_value = mock_ws
 
         chunks = [{"node_path": "/obj/pyro", "node_type": "pyrosolver"}]
         res = client.ingest_scene("/tmp/explosion.hip", chunks)
 
-        assert res["indexed"] == 5
+        assert res["chunks_ingested"] == 5
         assert mock_ws.send.called
 
 

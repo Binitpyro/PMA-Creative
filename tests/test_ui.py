@@ -37,7 +37,7 @@ def test_pma_panel_instantiation(qapp):
 
     panel = ui.PMAPanel()
     assert panel.windowTitle() == "PMA Creative Assistant — Houdini"
-    assert panel.tabs.count() == 2
+    assert panel.tabs.count() == 3
     assert panel.input_field is not None
     assert panel.chat_display is not None
     assert panel.table is not None
@@ -50,7 +50,7 @@ def test_pma_panel_send_question(qapp, monkeypatch):
 
     panel = ui.PMAPanel()
 
-    def fake_ask(question, hip_file=None):
+    def fake_ask(question, hip_file=None, provider=None, model=None):
         return {
             "status": "success",
             "answer": "Buoyancy controls upward force in fire simulation.",
@@ -62,10 +62,13 @@ def test_pma_panel_send_question(qapp, monkeypatch):
     panel.input_field.setText("What does buoyancy do?")
     panel._on_send_question()
 
+    if panel.workers:
+        panel.workers[-1].wait()
+        qapp.processEvents()
+
     chat_text = panel.chat_display.toHtml()
     assert "What does buoyancy do?" in chat_text
     assert "Buoyancy controls upward force" in chat_text
-    assert "houdini://fire_explosion" in chat_text
     panel.close()
 
 

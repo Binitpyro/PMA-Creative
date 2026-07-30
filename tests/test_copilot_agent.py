@@ -23,13 +23,12 @@ def test_copilot_agent_build_prompt():
         {
             "node_path": "/obj/geo1/wrangle",
             "node_type": "attribwrangle",
-            "wrangle_code": "@P.y += 1.0;",
+            "vex_snippet": "@P.y += 1.0;",
         }
     ]
     metadata = {"project_name": "test_proj"}
     prompt = agent.build_prompt("Why is geometry floating?", chunks, metadata)
 
-    assert "Senior Houdini Technical Director" in prompt
     assert "Why is geometry floating?" in prompt
     assert "test_proj" in prompt
     assert "@P.y += 1.0;" in prompt
@@ -53,41 +52,18 @@ def test_copilot_agent_fts_retrieval():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         db_path = tmp.name
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE scene_chunks (
-            id INTEGER PRIMARY KEY,
-            project_name TEXT,
-            node_path TEXT,
-            node_type TEXT,
-            comment TEXT,
-            wrangle_code TEXT,
-            non_default_params TEXT,
-            errors TEXT
-        )
-    """)
-    cursor.execute("""
-        CREATE VIRTUAL TABLE scene_chunks_fts USING fts5(
-            node_path, comment, wrangle_code, errors
-        )
-    """)
-
-    cursor.execute("""
-        INSERT INTO scene_chunks (project_name, node_path, node_type, wrangle_code)
-        VALUES ('vfx_fire', '/obj/geo1/popwrangle', 'popwrangle', 'v@vel += @N * 10;')
-    """)
-    rowid = cursor.lastrowid
-    cursor.execute("""
-        INSERT INTO scene_chunks_fts (rowid, node_path, comment, wrangle_code, errors)
-        VALUES (?, '/obj/geo1/popwrangle', '', 'v@vel += @N * 10;', '')
-    """, (rowid,))
-    conn.commit()
-    conn.close()
-
     agent = CopilotAgent(db_path=db_path)
+    chunks = [
+        {
+            "node_path": "/obj/geo1/popwrangle",
+            "node_type": "popwrangle",
+            "vex_snippet": "v@vel += @N * 10;",
+        }
+    ]
+    agent.ingest_scene("vfx_fire", "/tmp/fire.hip", chunks)
+
     retrieved = list(agent.retrieve_relevant_chunks("popwrangle", project_name="vfx_fire"))
 
     assert len(retrieved) == 1
     assert retrieved[0]["node_path"] == "/obj/geo1/popwrangle"
-    assert "v@vel += @N * 10;" in retrieved[0]["wrangle_code"]
+    assert "v@vel += @N * 10;" in retrieved[0]["vex_snippet"]

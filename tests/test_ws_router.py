@@ -37,19 +37,19 @@ async def test_ws_router_ingest_and_query(monkeypatch):
         "hip_file": "/scenes/test_sim.hip",
         "chunks": [
             {
-                "path": "/obj/geo1/attribwrangle1",
-                "type": "attribwrangle",
+                "node_path": "/obj/geo1/attribwrangle1",
+                "node_type": "attribwrangle",
                 "comment": "Initial velocity wrangle",
-                "wrangle_code": "v@v = set(0, 1, 0);",
+                "vex_snippet": "v@v = set(0, 1, 0);",
                 "errors": [],
-                "non_default_params": {},
+                "non_default_parms": {},
             }
         ],
         "houdini_version": "20.5.278",
         "platform": "win64",
     })
 
-    ingest_res_str = await router.handle_message(ingest_msg, token="dev_token")
+    ingest_res_str = await router.handle_message(ingest_msg, token="test_token")
     ingest_res = json.loads(ingest_res_str)
     assert ingest_res["status"] == "success"
     assert ingest_res["chunks_ingested"] == 1
@@ -60,7 +60,7 @@ async def test_ws_router_ingest_and_query(monkeypatch):
         "question": "How is initial velocity set?",
         "project_name": "test_sim",
     })
-    query_res_str = await router.handle_message(query_msg, token="dev_token")
+    query_res_str = await router.handle_message(query_msg, token="test_token")
     query_res = json.loads(query_res_str)
     assert query_res["status"] == "success"
     assert "answer" in query_res
@@ -68,7 +68,7 @@ async def test_ws_router_ingest_and_query(monkeypatch):
 
     # Test List Projects Action
     list_msg = json.dumps({"action": "creative_list_projects"})
-    list_res_str = await router.handle_message(list_msg, token="dev_token")
+    list_res_str = await router.handle_message(list_msg, token="test_token")
     list_res = json.loads(list_res_str)
     assert list_res["status"] == "success"
     assert len(list_res["projects"]) == 1

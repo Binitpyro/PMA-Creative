@@ -146,39 +146,26 @@ def extract_node(node) -> dict[str, Any] | None:
     comment = _node_comment(node)
     snippet = _wrangle_snippet(node)
     errors, warnings = _node_errors_warnings(node)
-    parms = {} if node_type in SKIP_PARM_TYPES else _non_default_parms(node)
-    solver_parms = _solver_parms(node)
-    render_parms = _render_parms(node)
-    connections = _node_connections(node)
+    all_errors = list(errors) + [f"Warning: {w}" for w in warnings]
+
+    combined_parms = {}
+    if node_type not in SKIP_PARM_TYPES:
+        combined_parms.update(_non_default_parms(node))
+    combined_parms.update(_solver_parms(node))
+    combined_parms.update(_render_parms(node))
+
     hda_doc = _hda_doc(node)
 
-    if not any(
-        [
-            comment,
-            snippet,
-            errors,
-            warnings,
-            parms,
-            solver_parms,
-            render_parms,
-            hda_doc,
-        ]
-    ):
+    if not any([comment, snippet, all_errors, combined_parms, hda_doc]):
         return None
 
     return {
         "node_path": node.path(),
         "node_type": node.type().name(),
-        "node_category": node.type().category().name(),
         "comment": comment,
         "vex_snippet": snippet,
-        "non_default_parms": parms,
-        "solver_parms": solver_parms,
-        "render_parms": render_parms,
-        "connections": connections,
-        "errors": errors,
-        "warnings": warnings,
-        "hda_doc": hda_doc,
+        "non_default_parms": combined_parms,
+        "errors": all_errors,
     }
 
 
