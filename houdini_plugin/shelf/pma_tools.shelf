@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Install: copy this file into $HOUDINI_USER_PREF_DIR/toolbar/, or
+  Houdini > Windows > Toolbar > (gear icon) > Import Shelf...
+
+  Requires pma_houdini/ to be on hython's sys.path.
+-->
+<shelfDocument>
+  <toolshelf name="pma_creative" label="PMA Creative">
+    <memberTool name="pma_panel"/>
+    <memberTool name="pma_index_scene"/>
+    <memberTool name="pma_ask"/>
+    <memberTool name="pma_cross_search"/>
+    <memberTool name="pma_browse_projects"/>
+    <memberTool name="pma_version_info"/>
+  </toolshelf>
+
+  <tool name="pma_panel" label="PMA: Open Panel" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+from pma_houdini import ui
+ui.show_pma_panel()
+]]></script>
+  </tool>
+
+  <tool name="pma_index_scene" label="PMA: Index Scene" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+import hou
+from pma_houdini import extractor, client, version_detect
+
+v_info = version_detect.detect_houdini_version()
+v_str = version_detect.get_version_summary()
+
+hip_file = hou.hipFile.path()
+try:
+    chunks = extractor.extract_scene("/obj", max_nodes=10000)
+    if not chunks:
+        hou.ui.displayMessage(
+            "No node comments, VEX snippets, non-default parms, or errors "
+            "found under /obj — nothing to index.",
+            severity=hou.severityType.Warning,
+        )
+    else:
+        result = client.ingest_scene(
+            hip_file=hip_file,
+            chunks=chunks,
+            houdini_version=v_info.get("full_version", ""),
+            platform=v_info.get("platform", ""),
+            metadata=v_info,
+        )
+        hou.ui.displayMessage(
+            f"Successfully indexed {len(chunks)} nodes from:\n{hip_file}\n\n"
+            f"Environment: {v_str}",
+            title="PMA: Scene Indexed",
+        )
+except Exception as e:
+    hou.ui.displayMessage(str(e), severity=hou.severityType.Error)
+]]></script>
+  </tool>
+
+  <tool name="pma_ask" label="PMA: Ask" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+from pma_houdini import ui
+panel = ui.show_pma_panel()
+panel.tabs.setCurrentIndex(0)
+panel.scope_combo.setCurrentIndex(0)
+]]></script>
+  </tool>
+
+  <tool name="pma_cross_search" label="PMA: Cross-Project Search" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+from pma_houdini import ui
+panel = ui.show_pma_panel()
+panel.tabs.setCurrentIndex(0)
+panel.scope_combo.setCurrentIndex(1)
+]]></script>
+  </tool>
+
+  <tool name="pma_browse_projects" label="PMA: Browse Projects" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+from pma_houdini import ui
+panel = ui.show_pma_panel()
+panel.tabs.setCurrentIndex(1)
+panel._on_refresh_projects()
+]]></script>
+  </tool>
+
+  <tool name="pma_version_info" label="PMA: Version Info" icon="MISC_python">
+    <script scriptType="python"><![CDATA[
+import hou
+from pma_houdini import version_detect
+
+info = version_detect.detect_houdini_version()
+summary = version_detect.get_version_summary()
+compatible = version_detect.is_compatible()
+
+status = "✅ Fully Compatible (Houdini 20.0.368+)" if compatible else "⚠️ Target version is 20.0.368+"
+
+hou.ui.displayMessage(
+    f"Houdini Environment:\n{summary}\n\n"
+    f"Details:\n"
+    f" • Build: {info.get('full_version')}\n"
+    f" • Platform: {info.get('platform')}\n"
+    f" • Python: {info.get('python_version')}\n"
+    f" • License: {'Apprentice' if info.get('is_apprentice') else 'Commercial/Indie'}\n\n"
+    f"PMA Status: {status}",
+    title="PMA Version & Environment Info",
+)
+]]></script>
+  </tool>
+</shelfDocument>
