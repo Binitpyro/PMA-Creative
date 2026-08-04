@@ -82,7 +82,8 @@ def triage_trial_signup(
         latency_ms=elapsed_ms,
     )
 
-    stripe_link = "https://buy.stripe.com/test_zeni_creative_trial"
+    from src.business.payment import create_checkout_session
+    payment_info = create_checkout_session(tier=recommended_tier, customer_email=email)
 
     return {
         "status": "success",
@@ -90,5 +91,6 @@ def triage_trial_signup(
         "recommended_tier": recommended_tier,
         "reasoning": reasoning,
         "onboarding_note": onboarding_note,
-        "stripe_checkout_url": stripe_link,
+        "stripe_checkout_url": payment_info.get("checkout_url"),
+        "session_id": payment_info.get("session_id"),
     }

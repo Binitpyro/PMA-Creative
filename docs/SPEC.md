@@ -1,79 +1,64 @@
-# XPrize Creative Module - Bootstrap Specification (Updated)
+# Zeni Creative Module - Connection & Module Specification
 
-This document provides all the necessary context, architecture, and project structure to bootstrap the **XPrize Creative Module** in a completely separate repository. 
+This document provides the context, architecture, and project structure for the **Zeni Creative Module**.
 
 ---
 
 > [!IMPORTANT]
 > **Core Objective**
-> The XPrize Creative Module is a standalone client application (sidecar) that connects to the Personal Memory Assistant (PMA) Core. It leverages the PMA Core's retrieval capabilities while operating in its own isolated memory space to handle specialized, high-temperature "creative" LLM generation tasks specifically for the XPrize requirements.
+> Zeni is a standalone service that operates on port 8765. It runs its own SQLite FTS5 database (`data/zeni.db`) for in-Houdini scene graph retrieval, while delegating LLM inference requests to PMA Core's provider layer (`POST /api/llm/chat`).
 
 ## 1. Connection Architecture
 
-The PMA Core (v0.0.70) exposes a secure WebSocket endpoint designed specifically for external modules.
+Zeni runs a standalone FastAPI + Uvicorn server.
 
 *   **Protocol:** WebSocket (`ws://` or `wss://`)
-*   **Endpoint:** `/api/modules/ws` *(Confirmed against `main.py` and `tests/test_modules_ws.py`)*
-*   **Authentication:** Requires the `X_LOCAL_ACCESS_TOKEN`. This token must match the one running in the PMA Core.
-    *   *Method 1 (Preferred):* Pass as an HTTP Header: `x-local-access-token: <TOKEN>`
-    *   *Method 2 (Fallback):* Pass as a query parameter: `?token=<TOKEN>`
+*   **Endpoint:** `/ws` on port `8765` (`ws://localhost:8765/ws`)
+*   **Authentication:** Requires the `ZENI_ACCESS_TOKEN` or `X_LOCAL_ACCESS_TOKEN`.
+    *   *Method 1:* Pass as an HTTP Header: `x-local-access-token: <TOKEN>`
+    *   *Method 2:* Pass as a query parameter: `?token=<TOKEN>`
 
-### 1.1 Secret Handling (CRITICAL)
+### 1.1 Secret & Token Handling
 
-> [!CAUTION]
-> Do NOT store `X_LOCAL_ACCESS_TOKEN` in a plaintext `.env` file. The PMA Core uses the OS Keyring to load this secret securely. The Creative Module must do the same.
+Zeni retrieves access tokens via OS Keyring (`ZeniCreativeModule` service) with fallback to `ZENI_ACCESS_TOKEN` or `X_LOCAL_ACCESS_TOKEN` environment variables. All token comparisons use `secrets.compare_digest` for constant-time security.
 
-Use the Python `keyring` library to retrieve the token on boot:
-```python
-import keyring
-token = keyring.get_password("PersonalMemoryAssistant", "X_LOCAL_ACCESS_TOKEN")
-```
+### 1.2 Action Dispatch Schema
 
-### 1.2 Message Envelope & Missing Contract
-
-Currently, the PMA Core only implements a `ping` action. Any other action is simply echoed back. **The contract for context retrieval does not exist yet and must be built on the PMA Core side concurrently with this client.**
-
-**Proposed Contract Schema (JSON-RPC 2.0 style):**
-*Client Request (Search):*
-```json
-{
-  "action": "search",
-  "query": "XPrize context regarding X",
-  "limit": 5
-}
-```
-*Core Response (Streaming vs Single-Shot):*
-```json
-{
-  "status": "success",
-  "action": "search",
-  "data": {
-    "results": [
-      {"chunk": "...", "score": 0.9}
-    ]
-  }
-}
-```
-*Note: Ensure the new agent explicitly defines and agrees upon this schema with the PMA Core before writing the client.*
+Zeni dispatches actions over WebSocket:
+- `creative_ingest`: Ingests node chunks into SQLite FTS5.
+- `creative_query`: Executes RAG search and returns synthesized copilot answer.
+- `creative_cross_query`: Cross-project recall across indexed `.hip` scenes.
+- `creative_list_projects`: Lists distinct indexed projects.
+- `creative_list_providers`: Fetches available LLM providers from Core (`GET /api/providers`).
 
 ---
 
-## 2. Recommended Project Structure
+## 2. Project Structure
 
 ```text
-xprize-creative-module/
-├── requirements.txt         # websockets, pydantic, httpx, keyring
-├── main.py                  # Application entrypoint & CLI
+PMA-CreativeXprize/
+├── requirements.txt         # websockets, pydantic, httpx, keyring, fastapi, uvicorn
+├── pyproject.toml           # Hatchling build & pytest configuration
+├── main.py                  # Standalone FastAPI server on port 8765
 ├── src/
-│   ├── __init__.py
-│   ├── client/
-│   │   ├── __init__.py
-│   │   └── pma_ws_client.py # Manages the persistent WebSocket connection to PMA Core
+│   ├── business/
+│   │   ├── store.py         # Autonomous decision log store with fsync
+│   │   ├── triage.py        # Autonomous trial signup triage agent
+│   │   └── payment.py       # Stripe Checkout & Webhook handler
 │   ├── core/
-│   │   ├── __init__.py
-│   │   └── xprize_agent.py  # The LLM / Creative generation logic
+│   │   ├── pma_llm.py       # Core LLM provider HTTP client
+│   │   ├── zeni_agent.py    # Zeni FTS5 retriever & answer coordinator
+│   │   ├── zeni_prompt.py   # Context formatters and prompt routers
+│   │   └── prompt_library.py # Central prompt registry
+│   ├── server/
+│   │   └── ws_router.py     # Async WebSocket message router
 │   └── models/
-│       ├── __init__.py
-│       └── schemas.py       # Pydantic models for the WS JSON envelopes
-└── README.md
+│       └── schemas.py       # Pydantic v2 schemas
+├── houdini_plugin/
+│   └── pma_houdini/
+│       ├── client.py        # Direct WebSocket client to Zeni server
+│       ├── extractor.py     # Node graph walker & VEX extractor
+│       ├── ui.py            # Non-blocking PySide Qt Panel with Settings
+│       └── version_detect.py # Houdini version detection
+└── tests/                   # Pytest suite
 ```

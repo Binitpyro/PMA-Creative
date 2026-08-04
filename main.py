@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import uvicorn
 
@@ -62,9 +62,40 @@ async def signup(req: SignupRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Stripe Webhook Endpoint verifying signature and logging payment events."""
+    try:
+        from src.business.payment import process_stripe_webhook
+        payload = await request.body()
+        sig_header = request.headers.get("stripe-signature")
+        return process_stripe_webhook(payload, sig_header=sig_header)
+    except ValueError as e:
+        logger.warning(f"Invalid webhook payload or signature: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error handling Stripe webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/gumroad/webhook")
+async def gumroad_webhook(request: Request):
+    """Gumroad Webhook Endpoint handling form-encoded sale notifications (pings)."""
+    try:
+        import urllib.parse
+        from src.business.payment import process_gumroad_webhook
+        raw_body = await request.body()
+        parsed_qs = urllib.parse.parse_qs(raw_body.decode("utf-8"))
+        form_data = {k: v[0] if len(v) == 1 else v for k, v in parsed_qs.items()}
+        return process_gumroad_webhook(form_data)
+    except Exception as e:
+        logger.error(f"Error handling Gumroad webhook ping: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def start():
     port = int(os.environ.get("ZENI_PORT", "8765"))
-    host = os.environ.get("ZENI_HOST", "0.0.0.0")
+    host = os.environ.get("ZENI_HOST", "127.0.0.1")
     logger.info(f"Starting Zeni standalone server on {host}:{port}")
     uvicorn.run(app, host=host, port=port)
 

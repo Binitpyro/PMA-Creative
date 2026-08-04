@@ -254,6 +254,50 @@ class PMAPanel(QtWidgets.QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
+    def _get_settings_file_path(self) -> str:
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        settings_dir = os.path.join(base_dir, "data")
+        os.makedirs(settings_dir, exist_ok=True)
+        return os.path.join(settings_dir, "settings.json")
+
+    def _load_settings(self) -> None:
+        try:
+            path = self._get_settings_file_path()
+            if os.path.exists(path):
+                import json
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "core_url" in data:
+                    self.input_core_url.setText(data["core_url"])
+                if "token" in data:
+                    self.input_token.setText(data["token"])
+                if "provider" in data:
+                    idx = self.combo_provider.findText(data["provider"])
+                    if idx >= 0:
+                        self.combo_provider.setCurrentIndex(idx)
+                    else:
+                        self.combo_provider.addItem(data["provider"])
+                        self.combo_provider.setCurrentText(data["provider"])
+                if "model" in data:
+                    self.input_model.setText(data["model"])
+        except Exception as e:
+            logger.warning(f"Could not load UI settings: {e}")
+
+    def _save_settings(self) -> None:
+        try:
+            path = self._get_settings_file_path()
+            import json
+            data = {
+                "core_url": self.input_core_url.text().strip(),
+                "token": self.input_token.text().strip(),
+                "provider": self.combo_provider.currentText().strip(),
+                "model": self.input_model.text().strip(),
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save UI settings: {e}")
+
     def _init_settings_tab(self) -> None:
         layout = QtWidgets.QVBoxLayout(self.settings_tab)
         form_layout = QtWidgets.QFormLayout()
@@ -267,7 +311,10 @@ class PMAPanel(QtWidgets.QDialog):
         form_layout.addRow("Access Token:", self.input_token)
 
         self.combo_provider = QtWidgets.QComboBox()
-        self.combo_provider.addItems(["ollama", "lm_studio", "openai", "anthropic", "gemini"])
+        self.combo_provider.addItems([
+            "ollama", "lm_studio", "openai", "anthropic", "gemini",
+            "groq", "openrouter", "nvidia_nim", "openai_compatible"
+        ])
         form_layout.addRow("LLM Provider:", self.combo_provider)
 
         self.input_model = QtWidgets.QLineEdit("llama3")
@@ -284,6 +331,13 @@ class PMAPanel(QtWidgets.QDialog):
         btn_row.addStretch()
         layout.addLayout(btn_row)
         layout.addStretch()
+
+        self.input_core_url.textChanged.connect(self._save_settings)
+        self.input_token.textChanged.connect(self._save_settings)
+        self.combo_provider.currentTextChanged.connect(self._save_settings)
+        self.input_model.textChanged.connect(self._save_settings)
+
+        self._load_settings()
 
     def _on_send_question(self) -> None:
         question = self.input_field.text().strip()

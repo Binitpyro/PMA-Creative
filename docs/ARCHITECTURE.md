@@ -11,18 +11,18 @@
 │   [ Shelf Tools ] ──►  extractor.py  ──►  PySide UI (ui.py)             │
 │                             │                  ▲                       │
 └─────────────────────────────┼──────────────────┼───────────────────────┘
-                              │ Node Chunks      │ Token Stream
+                              │ Node Chunks      │ Action Responses
                               ▼                  │
 ┌────────────────────────────────────────────────────────────────────────┐
-│                     Zeni Server (Python 3.12)                          │
+│                     Zeni Server (main.py, Port 8765)                   │
 │                                                                        │
-│   [ ws_router.py ] ◄── (WebSocket: ws://localhost:8000/api/modules/ws) │
+│   [ ws_router.py ] ◄── (WebSocket: ws://localhost:8765/ws)             │
 │          │                                                             │
 │          ▼                                                             │
-│   [ ZeniAgent (zeni_agent.py) ] ───► SQLite FTS5 (Local DB)            │
+│   [ ZeniAgent (zeni_agent.py) ] ───► SQLite FTS5 (Local DB data/zeni.db)│
 │          │                                                             │
 │          ▼                                                             │
-│   [ PromptLibrary (prompt_library.py) ] ───► Gemini API                │
+│   [ pma_llm.py ] ───► Core Provider Layer (POST /api/llm/chat)        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -30,46 +30,47 @@
 
 ## 2. Core Architectural Principles
 
-1. **Local-First & Private**:
-   All scene graph indexing is stored locally in SQLite FTS5. Node wrangles and parameters are only sent to the user's configured Gemini API endpoint (AI Studio key or Vertex AI).
+1. **Local-First & Private Search**:
+   All scene graph indexing and FTS5 retrieval is stored locally in SQLite (`data/zeni.db`). Requests delegate to PMA Core's provider layer (`POST /api/llm/chat`) using whatever provider/model the artist configures in Settings (e.g. 100% offline Ollama / LM Studio).
 
-2. **Ultra-Low Memory Footprint (<60MB RAM)**:
-   Designed to respect local workstation resources so Houdini's viewport, simulation solvers, and rendering threads are never starved of system CPU/GPU memory.
+2. **Low-Overhead Indexing**:
+   Node wrangles and non-default parameter dictionaries are indexed using FTS5 triggers with $O(1)$ batch processing (`executemany`).
 
-3. **O(1) Streaming Pipeline**:
-   - Ingestion inserts node graph chunks using $O(1)$ batch processing.
-   - RAG retrieval iterates over SQLite DB cursors without loading full result sets into RAM (`fetchall()`).
-   - Gemini LLM answers stream token-by-token over WebSocket to the PySide UI for immediate feedback.
+3. **Core Provider Layer Inheritance**:
+   Zeni does not vendor cloud AI SDKs (`google-genai` or vendor SDKs). All inference routes through Core's 9-provider engine, keeping API secrets in Core's OS keyring (`pma_backend`).
 
-4. **Python 3.12 Strict Standard**:
-   All server components (`src/`) adhere strictly to Python 3.12 for 100% compatibility with PMA Core.
+4. **Python Version Compatibility**:
+   - `src/` (Standalone Server): Runs on Python 3.10+ (tested on Python 3.11/3.14).
+   - `houdini_plugin/` (In-Houdini): Compatible with Houdini 20.0's hython (Python 3.10) and PySide2 / PySide6.
 
 ---
 
 ## 3. Component Architecture
 
-### 3.1 Server Router (`src/server/ws_router.py`)
-- Async WebSocket message router handling incoming JSON envelopes.
-- Authenticates requests using `x-local-access-token` header verified against OS `keyring` (`PersonalMemoryAssistant` service).
-- Dispatches actions:
+### 3.1 Standalone Server (`main.py` & `src/server/ws_router.py`)
+- Async FastAPI + Uvicorn server running on port `8765` bound to `127.0.0.1` by default.
+- Authenticates requests using `x-local-access-token` header verified against `ZENI_ACCESS_TOKEN` / `X_LOCAL_ACCESS_TOKEN` using `secrets.compare_digest`.
+- Dispatches WS actions:
   - `creative_ingest`: Ingests node chunks into SQLite FTS5.
-  - `creative_query`: Executes RAG search and streams Zeni's LLM response.
+  - `creative_query`: Executes RAG search and synthesizes TD copilot answers.
   - `creative_cross_query`: Searches solutions across multiple `.hip` projects.
-  - `creative_list_projects`: Scans distinct indexed projects.
+  - `creative_list_projects`: Lists distinct indexed projects.
+  - `creative_list_providers`: Fetches available LLM providers from PMA Core.
 
 ### 3.2 Zeni Core Agent (`src/core/zeni_agent.py`)
-- Coordinates local SQLite FTS5 storage and retrieval.
-- Formats prompt payloads using `format_cacheable_prompt` for optimal LLM prompt-caching.
-- Interfaces with Gemini API (`google-generativeai` or Vertex AI).
+- Coordinates local SQLite FTS5 storage and trigger-backed retrieval.
+- Routes queries deterministically to `vex_expert`, `sim_debugger`, or `copilot_td`.
+- Delegates LLM answer generation to `pma_llm.chat()`.
 
-### 3.3 Prompt Library (`src/core/prompt_library.py`)
-- Centralized registry managing version-controlled system prompts with Prompt Caching prefix structure.
-- Includes 5 specialized Houdini pain-point prompts (`vex_expert`, `sim_debugger`, `usd_solaris`, `kinefx_rigging`, `tops_pdg`).
+### 3.3 Autonomous Business Module (`src/business/`)
+- `store.py`: `log_agent_decision` writes structured records to `logs/agent_decisions.jsonl` with atomic `fsync`.
+- `triage.py`: Autonomous trial signup triage agent evaluating customer requirements.
+- `payment.py`: Stripe Checkout session creation and webhook signature processing.
 
 ### 3.4 In-Houdini Plugin (`houdini_plugin/pma_houdini/`)
-- `extractor.py`: Traverses the active `.hip` node tree and extracts comments, VEX wrangle code, non-default parameters, and errors/warnings.
-- `ui.py`: PySide2 / PySide6 Qt dialogs providing interactive Q&A panels inside Houdini.
-- `client.py`: WebSocket client connecting to Zeni server.
+- `extractor.py`: Traverses `.hip` node graph and extracts comments, VEX snippets, non-default parms, and errors/warnings.
+- `ui.py`: Non-blocking PySide Qt dialogs with QThread worker execution and Settings persistence (`data/settings.json`).
+- `client.py`: Direct WebSocket client to Zeni server.
 
 ---
 
@@ -83,15 +84,15 @@
   "hip_file": "/scenes/vfx_explosion.hip",
   "chunks": [
     {
-      "path": "/obj/geo1/attribwrangle1",
-      "type": "attribwrangle",
+      "node_path": "/obj/geo1/attribwrangle1",
+      "node_type": "attribwrangle",
       "comment": "Calculates velocity noise",
-      "wrangle_code": "v@v += curlnoise(@P * 0.5);",
+      "vex_snippet": "v@v += curlnoise(@P * 0.5);",
       "errors": ["Warning: Undefined variable @vel"],
-      "non_default_params": {"snippet": "v@v += curlnoise(@P * 0.5);"}
+      "non_default_parms": {"snippet": "v@v += curlnoise(@P * 0.5);"}
     }
   ],
-  "houdini_version": "20.5.278",
+  "houdini_version": "20.0.368",
   "platform": "win64"
 }
 ```
@@ -101,7 +102,9 @@
 {
   "action": "creative_query",
   "question": "Why is my velocity wrangle giving an undefined variable warning?",
-  "project_name": "vfx_explosion"
+  "project_name": "vfx_explosion",
+  "provider": "ollama",
+  "model": "llama3"
 }
 ```
 
@@ -111,6 +114,8 @@
   "status": "success",
   "action": "creative_query",
   "answer": "### Root Cause\nThe variable `vel` is used without a VEX vector qualifier (`v@vel`)...\n\n### VEX / Node Fix\n```c\nv@vel += set(0, 1, 0);\n```\n\n### Step-by-Step Instructions\n1. Select `attribwrangle1`...\n",
-  "chunks_retrieved": 1
+  "chunks_retrieved": 1,
+  "provider": "ollama",
+  "model": "llama3"
 }
 ```
