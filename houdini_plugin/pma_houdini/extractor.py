@@ -155,16 +155,48 @@ def extract_node(node) -> dict[str, Any] | None:
     combined_parms.update(_render_parms(node))
 
     hda_doc = _hda_doc(node)
+    connections = _node_connections(node)
+
+    # Assets extraction heuristic: find string parms that look like file paths
+    assets = []
+    try:
+        for parm in node.parms():
+            try:
+                # Often file parms are string type and not default, or they have 'file' in name
+                if parm.parmTemplate().type().name() == "String":
+                    val = parm.evalAsString()
+                    if val and ("." in val or "/" in val or "\\" in val) and not val.startswith("`"):
+                        if "file" in parm.name().lower() or "tex" in parm.name().lower():
+                            assets.append(val)
+            except Exception:
+                continue
+    except Exception:
+        pass
 
     if not any([comment, snippet, all_errors, combined_parms, hda_doc]):
         return None
 
-    return {
-        "node_path": node.path(),
-        "node_type": node.type().name(),
-        "comment": comment,
-        "vex_snippet": snippet,
+    # DCC agnostic schema fields
+    dcc_properties = {
+        "code_snippet": snippet,
         "non_default_parms": combined_parms,
+    }
+
+    import hou
+    scene_data = {
+        "fps": hou.fps(),
+        "frame_range": [hou.playbar.playbackRange()[0], hou.playbar.playbackRange()[1]]
+    }
+
+    return {
+        "path": node.path(),
+        "type": node.type().name(),
+        "comment": comment,
+        "dcc_properties": dcc_properties,
+        "connections": [connections],
+        "hda_doc": hda_doc,
+        "assets": assets,
+        "scene": scene_data,
         "errors": all_errors,
     }
 

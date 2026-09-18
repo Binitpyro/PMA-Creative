@@ -119,28 +119,6 @@ def _format_markdown_to_html(text: str) -> str:
     return escaped
 
 
-class WorkerThread(QtCore.QThread):
-    """Background worker thread to keep Qt main UI loop unblocked during network calls."""
-    finished_signal = QtCore.Signal(dict)
-    error_signal = QtCore.Signal(str)
-
-    def __init__(self, func, *args, **kwargs):
-        super().__init__()
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-
-    def run(self):
-        try:
-            res = self.func(*self.args, **self.kwargs)
-            if isinstance(res, dict):
-                self.finished_signal.emit(res)
-            else:
-                self.finished_signal.emit({"result": res})
-        except Exception as e:
-            self.error_signal.emit(str(e))
-
-
 class PMAPanel(QtWidgets.QDialog):
     """Floating non-blocking PySide Qt Panel for PMA Creative Assistant."""
 
@@ -165,16 +143,28 @@ class PMAPanel(QtWidgets.QDialog):
         if flags:
             self.setWindowFlags(flags)
 
-        self.workers = []
         self._init_ui()
+        
+        from pma_houdini import client, events
+        client.start_client(self._on_ws_message, self._on_ws_connected, self._on_ws_disconnected)
+        events.register_callbacks()
 
     def _init_ui(self) -> None:
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Tabs
+        # Splitter for Sidecar
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        main_layout.addWidget(self.splitter)
+
+        # Left side: Tabs
         self.tabs = QtWidgets.QTabWidget()
-        main_layout.addWidget(self.tabs)
+        self.splitter.addWidget(self.tabs)
+
+        # Right side: Sidecar Insights
+        self._init_sidecar()
+        self.splitter.addWidget(self.sidecar_widget)
+        self.splitter.setSizes([450, 200])
 
         # Tab 1: Chat Assistant
         self.chat_tab = QtWidgets.QWidget()
@@ -191,10 +181,39 @@ class PMAPanel(QtWidgets.QDialog):
         self._init_settings_tab()
         self.tabs.addTab(self.settings_tab, "Settings")
 
-        # Status Bar
-        self.status_label = QtWidgets.QLabel("Zeni Standalone Connected over WebSocket")
+        self.status_label = QtWidgets.QLabel("Connecting to Zeni Core over WebSocket...")
         self.status_label.setStyleSheet("color: #888888; font-size: 11px;")
         main_layout.addWidget(self.status_label)
+
+    def _init_sidecar(self) -> None:
+        self.sidecar_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(self.sidecar_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        lbl = QtWidgets.QLabel("Sidecar Insights")
+        lbl.setStyleSheet("font-weight: bold; color: #007acc;")
+        layout.addWidget(lbl)
+        
+        self.sidecar_list = QtWidgets.QListWidget()
+        self.sidecar_list.setWordWrap(True)
+        self.sidecar_list.setStyleSheet("background-color: #1a1a1a; border: 1px solid #3d3d3d;")
+        layout.addWidget(self.sidecar_list)
+
+    def _on_ws_connected(self):
+        self.status_label.setText("Zeni Core Connected")
+
+    def _on_ws_disconnected(self, err):
+        self.status_label.setText(f"Disconnected: {err}")
+
+    def _on_ws_message(self, msg):
+        if msg.get("action") == "scene.upsert" and msg.get("insights"):
+            for ins in msg.get("insights"):
+                insight_data = ins.get("insight")
+                if insight_data:
+                    path = ins.get("node_path")
+                    text = f"[{insight_data.get('insight_type')}] {path}: {insight_data.get('message')}"
+                    item = QtWidgets.QListWidgetItem(text)
+                    self.sidecar_list.insertItem(0, item)
 
     def _init_chat_tab(self) -> None:
         layout = QtWidgets.QVBoxLayout(self.chat_tab)
@@ -363,15 +382,13 @@ class PMAPanel(QtWidgets.QDialog):
         except Exception:
             pass
 
-        def run_query():
-            if scope == "Current Scene":
-                return client.ask(question, hip_file=hip_file, provider=provider, model=model)
-            else:
-                return client.cross_search(question, provider=provider, model=model)
-
-        worker = WorkerThread(run_query)
-
-        def on_success(resp):
+        def on_response(resp):
+            if resp.get("status") == "error":
+                err_html = f"<div style='color: #ff6b6b;'><b>Error:</b> {html.escape(resp.get('message', ''))}</div>"
+                self.chat_display.append(err_html)
+                self.status_label.setText("Query Error")
+                return
+                
             answer = resp.get("answer", "No answer returned.")
             used_prov = resp.get("provider") or provider
             used_model = resp.get("model") or model
@@ -385,15 +402,10 @@ class PMAPanel(QtWidgets.QDialog):
             self.chat_display.append(ans_html)
             self.status_label.setText("Done.")
 
-        def on_error(err_msg):
-            err_html = f"<div style='color: #ff6b6b;'><b>Error:</b> {html.escape(err_msg)}</div>"
-            self.chat_display.append(err_html)
-            self.status_label.setText("Query Error")
-
-        worker.finished_signal.connect(on_success)
-        worker.error_signal.connect(on_error)
-        self.workers.append(worker)
-        worker.start()
+        if scope == "Current Scene":
+            client.ask(question, hip_file=hip_file, provider=provider, model=model, callback=on_response)
+        else:
+            client.cross_search(question, provider=provider, model=model, callback=on_response)
 
     def _on_index_scene(self) -> None:
         self.status_label.setText("Extracting scene nodes...")
@@ -410,28 +422,21 @@ class PMAPanel(QtWidgets.QDialog):
                 self.status_label.setText("No nodes worth indexing found under /obj.")
                 return
 
-            def run_ingest():
-                return client.ingest_scene(
-                    hip_file=hip_file,
-                    chunks=chunks,
-                    houdini_version=v_info.get("full_version", ""),
-                    platform=v_info.get("platform", ""),
-                )
-
-            worker = WorkerThread(run_ingest)
-
-            def on_success(resp):
+            def on_response(resp):
+                if resp.get("status") == "error":
+                    self.status_label.setText(f"Indexing Error: {resp.get('message')}")
+                    return
                 count = resp.get("chunks_ingested", len(chunks))
                 self.status_label.setText(f"Successfully indexed {count} nodes.")
                 self._on_refresh_projects()
 
-            def on_error(err):
-                self.status_label.setText(f"Indexing Error: {err}")
-
-            worker.finished_signal.connect(on_success)
-            worker.error_signal.connect(on_error)
-            self.workers.append(worker)
-            worker.start()
+            client.ingest_scene(
+                hip_file=hip_file,
+                chunks=chunks,
+                houdini_version=v_info.get("full_version", ""),
+                platform=v_info.get("platform", ""),
+                callback=on_response
+            )
 
         except Exception as e:
             self.status_label.setText(f"Extraction Error: {e}")
@@ -439,10 +444,11 @@ class PMAPanel(QtWidgets.QDialog):
     def _on_refresh_projects(self) -> None:
         from pma_houdini import client
 
-        worker = WorkerThread(client.list_projects)
-
-        def on_success(res):
-            projects = res.get("result", [])
+        def on_response(res):
+            if res.get("status") == "error":
+                self.status_label.setText(f"Refresh Error: {res.get('message')}")
+                return
+            projects = res.get("projects", [])
             self.table.setRowCount(0)
             for p in projects:
                 row = self.table.rowCount()
@@ -454,22 +460,17 @@ class PMAPanel(QtWidgets.QDialog):
 
             self.status_label.setText(f"Loaded {len(projects)} projects.")
 
-        def on_error(err):
-            self.status_label.setText(f"Refresh Error: {err}")
-
-        worker.finished_signal.connect(on_success)
-        worker.error_signal.connect(on_error)
-        self.workers.append(worker)
-        worker.start()
+        client.list_projects(callback=on_response)
 
     def _on_load_providers(self) -> None:
         from pma_houdini import client
 
         self.status_label.setText("Fetching providers from PMA Core...")
-        worker = WorkerThread(client.list_providers)
-
-        def on_success(res):
-            providers = res.get("result", [])
+        def on_response(res):
+            if res.get("status") == "error":
+                self.status_label.setText(f"Could not load providers: {res.get('message')}")
+                return
+            providers = res.get("providers", [])
             if providers:
                 self.combo_provider.clear()
                 for p in providers:
@@ -480,13 +481,7 @@ class PMAPanel(QtWidgets.QDialog):
             else:
                 self.status_label.setText("No custom providers returned from Core.")
 
-        def on_error(err):
-            self.status_label.setText(f"Could not load providers: {err}")
-
-        worker.finished_signal.connect(on_success)
-        worker.error_signal.connect(on_error)
-        self.workers.append(worker)
-        worker.start()
+        client.list_providers(callback=on_response)
 
 
 def show_pma_panel() -> PMAPanel:

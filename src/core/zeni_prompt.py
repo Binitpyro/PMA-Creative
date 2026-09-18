@@ -23,19 +23,22 @@ __all__ = [
     "TRIAL_TRIAGE_SYSTEM_PROMPT",
     "PromptLibrary",
     "format_cacheable_prompt",
-    "format_scene_context",
+    "format_context",
 ]
 
 
-def format_scene_context(
+def format_context(
     metadata: dict[str, Any],
-    chunks: Iterable[dict[str, Any]],
+    scene_chunks: Iterable[dict[str, Any]],
+    corpus_chunks: Iterable[dict[str, Any]],
     max_total_chars: int = 12000,
     max_vex_chars: int = 1500,
 ) -> str:
-    """Format scene metadata and node graph chunks into a bounded Markdown context string."""
-    lines = ["## Houdini Scene Context"]
+    """Format scene metadata, node graph chunks, and personal corpus into a bounded Markdown context string."""
+    lines = []
 
+    # 1. SCENE CONTEXT
+    lines.append("## [SCENE_CONTEXT]")
     if metadata:
         lines.append("### Scene Metadata")
         if "project_name" in metadata:
@@ -51,7 +54,7 @@ def format_scene_context(
     lines.append("### Indexed Node Chunks")
     chunk_count = 0
 
-    for chunk in chunks:
+    for chunk in scene_chunks:
         chunk_count += 1
         node_path = chunk.get("path") or chunk.get("node_path", "Unknown Node")
         node_type = chunk.get("type") or chunk.get("node_type", "Unknown Type")
@@ -63,15 +66,13 @@ def format_scene_context(
 
         if chunk.get("errors"):
             errors = chunk["errors"]
-            if isinstance(errors, list):
-                err_str = "; ".join(str(e) for e in errors)
-            else:
-                err_str = str(errors)
+            err_str = "; ".join(str(e) for e in errors) if isinstance(errors, list) else str(errors)
             lines.append(f"**Errors / Warnings**: {err_str}")
 
-        vex_code = chunk.get("vex_snippet") or chunk.get("wrangle_code")
+        dcc_props = chunk.get("dcc_properties", {})
+        vex_code = dcc_props.get("code_snippet") or chunk.get("vex_snippet") or chunk.get("wrangle_code")
         if vex_code:
-            lines.append("**VEX Wrangle Code**:")
+            lines.append("**Code Snippet**:")
             lines.append("```c")
             code_str = vex_code.strip()
             if len(code_str) > max_vex_chars:
@@ -82,14 +83,35 @@ def format_scene_context(
         parms = chunk.get("non_default_parms") or chunk.get("non_default_params")
         if parms:
             lines.append(f"**Non-Default Parameters**: `{parms}`")
+            
+        flags = chunk.get("flags")
+        if flags:
+            lines.append(f"**Flags**: `{flags}`")
 
         lines.append("")
 
     if chunk_count == 0:
         lines.append("_No specific node graph chunks matched the query._\n")
 
+    # 2. CORPUS CONTEXT
+    lines.append("## [CORPUS_CONTEXT]")
+    corpus_count = 0
+    for chunk in corpus_chunks:
+        corpus_count += 1
+        title = chunk.get("title", "Untitled Document")
+        lines.append(f"### Source: {title}")
+        content = chunk.get("content", "")
+        lines.append(content)
+        lines.append("")
+        
+    if corpus_count == 0:
+        lines.append("_No personal corpus documents matched the query or corpus is unavailable._\n")
+
+    lines.append("## INSTRUCTIONS FOR LLM")
+    lines.append("IMPORTANT: When answering, you MUST provide source attribution. If using info from [CORPUS_CONTEXT], cite the Source title (e.g., 'Source: March Lookdev Notes').")
+
     full_text = "\n".join(lines)
     if len(full_text) > max_total_chars:
-        full_text = full_text[:max_total_chars] + "\n... [Scene context truncated due to length limits]\n"
+        full_text = full_text[:max_total_chars] + "\n... [Context truncated due to length limits]\n"
 
     return full_text

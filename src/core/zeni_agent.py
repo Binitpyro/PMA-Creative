@@ -12,7 +12,7 @@ from src.core.pma_llm import chat as pma_llm_chat
 from src.core.zeni_prompt import (
     ZENI_SYSTEM_PROMPT,
     format_cacheable_prompt,
-    format_scene_context,
+    format_context,
 )
 
 logger = logging.getLogger("zeni.agent")
@@ -60,6 +60,10 @@ class ZeniAgent:
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
+            # For simplicity during migration to DCC-agnostic schema, drop old tables
+            cursor.execute("DROP TABLE IF EXISTS scene_chunks")
+            cursor.execute("DROP TABLE IF EXISTS scene_chunks_fts")
+            
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scene_chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +77,11 @@ class ZeniAgent:
                     errors TEXT,
                     houdini_version TEXT,
                     platform TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    dcc_properties TEXT,
+                    flags TEXT,
+                    dependencies TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(project_name, node_path)
                 )
             """)
             cursor.execute("""
@@ -96,6 +104,14 @@ class ZeniAgent:
                     VALUES ('delete', old.id, old.node_path, old.node_type, old.comment, old.wrangle_code, old.errors);
                 END;
             """)
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS sc_au AFTER UPDATE ON scene_chunks BEGIN
+                    INSERT INTO scene_chunks_fts(scene_chunks_fts, rowid, node_path, node_type, comment, wrangle_code, errors)
+                    VALUES ('delete', old.id, old.node_path, old.node_type, old.comment, old.wrangle_code, old.errors);
+                    INSERT INTO scene_chunks_fts(rowid, node_path, node_type, comment, wrangle_code, errors)
+                    VALUES (new.id, new.node_path, new.node_type, new.comment, new.wrangle_code, new.errors);
+                END;
+            """)
             conn.commit()
         finally:
             conn.close()
@@ -116,6 +132,9 @@ class ZeniAgent:
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            
+            # Since this is a full sync, we delete existing nodes for this project first
             cursor.execute("DELETE FROM scene_chunks WHERE project_name = ?", (project_name,))
 
             insert_rows = []
@@ -123,22 +142,35 @@ class ZeniAgent:
                 path = chunk.get("node_path") or chunk.get("path", "")
                 node_type = chunk.get("node_type") or chunk.get("type", "")
                 comment = chunk.get("comment", "")
-                vex_snippet = chunk.get("vex_snippet") or chunk.get("wrangle_code", "")
+                
+                dcc_props = chunk.get("dcc_properties", {})
+                vex_snippet = dcc_props.get("code_snippet") or chunk.get("vex_snippet") or chunk.get("wrangle_code", "")
+                
                 errors = chunk.get("errors", [])
                 err_str = "; ".join(errors) if isinstance(errors, list) else str(errors)
                 params = chunk.get("non_default_parms") or chunk.get("non_default_params", {})
                 param_str = json.dumps(params) if isinstance(params, dict) else str(params)
+                
+                flags = chunk.get("flags", {})
+                flags_str = json.dumps(flags) if isinstance(flags, dict) else str(flags)
+                
+                deps = chunk.get("dependencies", [])
+                deps_str = json.dumps(deps) if isinstance(deps, list) else str(deps)
+                
+                dcc_props_str = json.dumps(dcc_props) if isinstance(dcc_props, dict) else str(dcc_props)
 
                 insert_rows.append((
                     project_name, hip_file, path, node_type, comment,
-                    vex_snippet, param_str, err_str, houdini_version, platform
+                    vex_snippet, param_str, err_str, houdini_version, platform,
+                    dcc_props_str, flags_str, deps_str
                 ))
 
             cursor.executemany("""
                 INSERT INTO scene_chunks (
                     project_name, hip_file, node_path, node_type, comment,
-                    wrangle_code, non_default_params, errors, houdini_version, platform
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    wrangle_code, non_default_params, errors, houdini_version, platform,
+                    dcc_properties, flags, dependencies
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, insert_rows)
 
             conn.commit()
@@ -148,7 +180,87 @@ class ZeniAgent:
                 "project_name": project_name,
             }
         except sqlite3.Error as e:
+            conn.rollback()
             logger.error(f"Failed ingesting scene chunks into SQLite: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def upsert_nodes(self, project_name: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        """Atomically upsert multiple nodes."""
+        if not nodes:
+            return {"status": "success", "nodes_upserted": 0}
+            
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            
+            upsert_rows = []
+            for chunk in nodes:
+                path = chunk.get("node_path") or chunk.get("path", "")
+                node_type = chunk.get("node_type") or chunk.get("type", "")
+                comment = chunk.get("comment", "")
+                
+                dcc_props = chunk.get("dcc_properties", {})
+                vex_snippet = dcc_props.get("code_snippet") or chunk.get("vex_snippet") or chunk.get("wrangle_code", "")
+                
+                errors = chunk.get("errors", [])
+                err_str = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                params = chunk.get("non_default_parms") or chunk.get("non_default_params", {})
+                param_str = json.dumps(params) if isinstance(params, dict) else str(params)
+                
+                flags = chunk.get("flags", {})
+                flags_str = json.dumps(flags) if isinstance(flags, dict) else str(flags)
+                
+                deps = chunk.get("dependencies", [])
+                deps_str = json.dumps(deps) if isinstance(deps, list) else str(deps)
+                
+                dcc_props_str = json.dumps(dcc_props) if isinstance(dcc_props, dict) else str(dcc_props)
+                
+                upsert_rows.append((
+                    project_name, path, node_type, comment, vex_snippet, param_str, 
+                    err_str, dcc_props_str, flags_str, deps_str
+                ))
+
+            cursor.executemany("""
+                INSERT INTO scene_chunks (
+                    project_name, node_path, node_type, comment,
+                    wrangle_code, non_default_params, errors,
+                    dcc_properties, flags, dependencies
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_name, node_path) DO UPDATE SET
+                    node_type=excluded.node_type,
+                    comment=excluded.comment,
+                    wrangle_code=excluded.wrangle_code,
+                    non_default_params=excluded.non_default_params,
+                    errors=excluded.errors,
+                    dcc_properties=excluded.dcc_properties,
+                    flags=excluded.flags,
+                    dependencies=excluded.dependencies
+            """, upsert_rows)
+
+            conn.commit()
+            return {"status": "success", "nodes_upserted": len(upsert_rows)}
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Failed upserting scene nodes: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+            
+    def delete_node(self, project_name: str, node_path: str) -> dict[str, Any]:
+        """Atomically delete a node."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute("DELETE FROM scene_chunks WHERE project_name = ? AND node_path = ?", (project_name, node_path))
+            conn.commit()
+            return {"status": "success", "node_deleted": node_path}
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error(f"Failed deleting scene node: {e}", exc_info=True)
             raise
         finally:
             conn.close()
@@ -210,15 +322,87 @@ class ZeniAgent:
         metadata: Optional[dict[str, Any]] = None,
         prompt_name: Optional[str] = None,
     ) -> str:
-        """Construct prompt payload using deterministic prompt routing."""
+        """Construct prompt payload using deterministic prompt routing and fetch corpus."""
+        import httpx
         chunk_list = list(chunks)
         selected_prompt = prompt_name or _route_prompt(question, chunk_list)
-        context_str = format_scene_context(metadata or {}, chunk_list)
+        
+        corpus_chunks = []
+        try:
+            core_url = os.environ.get("PMA_CORE_URL", "http://127.0.0.1:8000")
+            resp = httpx.post(f"{core_url}/api/corpus/retrieve", json={"query": question}, timeout=1.5)
+            if resp.status_code == 200:
+                corpus_chunks = resp.json().get("chunks", [])
+        except Exception as e:
+            logger.warning(f"Corpus retrieval failed or timed out: {e}")
+            
+        context_str = format_context(metadata or {}, chunk_list, corpus_chunks)
         return format_cacheable_prompt(
             prompt_name=selected_prompt,
             context_data=context_str,
             user_query=question,
         )
+
+    def evaluate_node_insight(
+        self,
+        node_data: dict[str, Any],
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Evaluate a node for sidecar insights, using zero-cost heuristics as a gatekeeper."""
+        node_path = node_data.get("node_path") or node_data.get("path", "")
+        node_type = node_data.get("node_type") or node_data.get("type", "")
+        dcc_props = node_data.get("dcc_properties", {})
+        code_snippet = dcc_props.get("code_snippet") or node_data.get("vex_snippet") or ""
+        errors = node_data.get("errors", [])
+
+        # HEURISTIC 1: Basic Node Errors (Zero Cost)
+        if errors:
+            return {
+                "insight_type": "Rule",
+                "message": f"Node has active errors: {'; '.join(errors) if isinstance(errors, list) else str(errors)}"
+            }
+
+        # HEURISTIC 2: VEX Code Linting (Zero Cost)
+        if code_snippet:
+            if "vel" in code_snippet and "v@vel" not in code_snippet:
+                return {
+                    "insight_type": "Rule",
+                    "message": "Potential VEX error: 'vel' used without vector qualifier 'v@vel'."
+                }
+
+        # HEURISTIC 3: Corpus Keyword Match (Zero Cost before LLM)
+        # If code snippet or node name matches specific keywords, we can query corpus
+        keywords = ["tonemap", "lookdev", "render", "flip", "pyro", "rbd", "vellum"]
+        if not any(k in node_type.lower() or k in node_path.lower() for k in keywords):
+            return None # Skip LLM if no heuristics pass
+
+        # If it passed heuristics, query LLM for a high-confidence hit
+        try:
+            import httpx
+            core_url = os.environ.get("PMA_CORE_URL", "http://127.0.0.1:8000")
+            query = f"Check {node_type} ({node_path}) against standard practices."
+            resp = httpx.post(f"{core_url}/api/corpus/retrieve", json={"query": query}, timeout=1.5)
+            corpus_chunks = resp.json().get("chunks", []) if resp.status_code == 200 else []
+            
+            if not corpus_chunks:
+                return None
+                
+            prompt = (
+                f"You are evaluating a node: {node_path} ({node_type}).\n"
+                f"Corpus mentions:\n{json.dumps(corpus_chunks)}\n"
+                "If there is a clear contradiction or serendipitous connection, reply with a short 1-sentence insight. Otherwise reply 'NONE'."
+            )
+            answer = pma_llm_chat([{"role": "user", "content": prompt}], provider=provider, model=model)
+            if "NONE" not in answer.strip().upper():
+                return {
+                    "insight_type": "AI Insight",
+                    "message": answer.strip()
+                }
+        except Exception as e:
+            logger.warning(f"Sidecar LLM evaluation failed: {e}")
+            
+        return None
 
     def generate_answer(
         self,

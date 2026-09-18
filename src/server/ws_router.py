@@ -17,6 +17,8 @@ from src.models.schemas import (
     CreativeIngestRequest,
     CreativeListProvidersRequest,
     CreativeQueryRequest,
+    CreativeUpsertNodesRequest,
+    CreativeDeleteNodeRequest,
 )
 
 logger = logging.getLogger("zeni.server")
@@ -74,6 +76,10 @@ class ZeniWSRouter:
             return await self._handle_list_projects()
         elif action == "creative_list_providers":
             return await self._handle_list_providers()
+        elif action == "scene.upsert":
+            return await self._handle_upsert(payload)
+        elif action == "scene.delete":
+            return await self._handle_delete(payload)
         else:
             return json.dumps({
                 "status": "error",
@@ -83,7 +89,7 @@ class ZeniWSRouter:
     async def _handle_ingest(self, payload: dict[str, Any]) -> str:
         try:
             req = CreativeIngestRequest(**payload)
-            chunks_dicts = [c.model_dump() for c in req.chunks]
+            chunks_dicts = [c.model_dump(by_alias=True) for c in req.chunks]
             res = self.agent.ingest_scene(
                 project_name=req.project_name,
                 hip_file=req.hip_file,
@@ -98,6 +104,37 @@ class ZeniWSRouter:
         except sqlite3.Error as e:
             logger.error(f"SQLite error during ingest: {e}", exc_info=True)
             return json.dumps({"status": "error", "message": f"Database error: {e}"})
+
+    async def _handle_upsert(self, payload: dict[str, Any]) -> str:
+        try:
+            req = CreativeUpsertNodesRequest(**payload)
+            nodes_dicts = [c.model_dump(by_alias=True) for c in req.nodes]
+            res = self.agent.upsert_nodes(project_name=req.project_name, nodes=nodes_dicts)
+            
+            # Evaluate insights for the sidecar
+            insights = []
+            for n in nodes_dicts:
+                insight = self.agent.evaluate_node_insight(n)
+                if insight:
+                    insights.append({"node_path": n.get("node_path") or n.get("path"), "insight": insight})
+            
+            return json.dumps({"status": "success", "action": "scene.upsert", "insights": insights, **res})
+        except ValidationError as e:
+            return json.dumps({"status": "error", "message": f"Upsert validation error: {e}"})
+        except Exception as e:
+            logger.error(f"Error handling upsert: {e}", exc_info=True)
+            return json.dumps({"status": "error", "message": str(e)})
+
+    async def _handle_delete(self, payload: dict[str, Any]) -> str:
+        try:
+            req = CreativeDeleteNodeRequest(**payload)
+            res = self.agent.delete_node(project_name=req.project_name, node_path=req.node_path)
+            return json.dumps({"status": "success", "action": "scene.delete", **res})
+        except ValidationError as e:
+            return json.dumps({"status": "error", "message": f"Delete validation error: {e}"})
+        except Exception as e:
+            logger.error(f"Error handling delete: {e}", exc_info=True)
+            return json.dumps({"status": "error", "message": str(e)})
 
     async def _handle_query(self, payload: dict[str, Any]) -> str:
         try:

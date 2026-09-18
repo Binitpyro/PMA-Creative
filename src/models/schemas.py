@@ -6,12 +6,24 @@ from pydantic import BaseModel, Field
 
 
 class IngestChunk(BaseModel):
-    node_path: str
-    node_type: str
+    node_path: str = Field(alias="path", default="")
+    node_type: str = Field(alias="type", default="")
     comment: str = ""
+    # Legacy fields
     vex_snippet: str = ""
     non_default_parms: dict[str, Any] = Field(default_factory=dict)
+    # New DCC agnostic fields
+    dcc_properties: dict[str, Any] = Field(default_factory=dict)
+    flags: dict[str, Any] = Field(default_factory=dict)
+    dependencies: list[str] = Field(default_factory=list)
+    connections: list[dict[str, Any]] = Field(default_factory=list)
+    hda_doc: str = ""
+    assets: list[str] = Field(default_factory=list)
+    scene: dict[str, Any] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
 
 
 class CreativeIngestRequest(BaseModel):
@@ -21,7 +33,20 @@ class CreativeIngestRequest(BaseModel):
     chunks: list[IngestChunk] = Field(default_factory=list)
     houdini_version: str = ""
     platform: str = ""
+    schema_version: str = "1.0.0"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreativeUpsertNodesRequest(BaseModel):
+    action: str = "scene.upsert"
+    project_name: str
+    nodes: list[IngestChunk] = Field(default_factory=list)
+
+
+class CreativeDeleteNodeRequest(BaseModel):
+    action: str = "scene.delete"
+    project_name: str
+    node_path: str
 
 
 class CreativeQueryRequest(BaseModel):
